@@ -1,0 +1,39 @@
+---
+title: "Codebook"
+subtitle: "Going nuclear-free: The electoral consequences of the nuclear phase-out for the Green parties in Switzerland"
+author: "Mirjam Grünholz & Colin Walder"
+date: "Version: `r Sys.Date()`"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+library(knitr)
+clean_cache(TRUE)
+opts_chunk$set(cache=TRUE, autodep = TRUE)
+
+options(htmltools.dir.version = FALSE)
+```
+
+This codebook describes the variables of the data sets used for our Methods III project "Going nuclear-free: The electoral consequences of the nuclear phase-out for the Green parties in Switzerland". The linked data set [`Nationalratswahlen (Anzahl Kandidaturen und Gewählte seit 1971)`](https://www.bfs.admin.ch/bfs/de/home/statistiken/politik/wahlen.assetdetail.12967003.html) provided by the Swiss Federal Statistical Office served as the basis for the analysis (`rohdaten.xlsx`). Although not required, we have documented the preparation of the dataset in the script `01_datawrangling.R`, resulting in the R-file `all_gemeinden.RData`. This data set, in turn, serves as the basis for the analysis in the `02_regressions.R` script. The variables contained are listed below:
+
+## Variables
+
+* `GMDNR` - Municipality code (according to BFS scheme)
+* `name` - Municipality name
+* `jahr`- Year (1999, 2003, 2007, 2011, 2015, and 2019)
+* `partei_code` - Party code
+* `partei_name` - Party name (acronym)
+* `parteistimmen` - Absolute number of votes for party
+* `parteistaerke` - Party vote share in %
+* `kanton` - Kanton (acronym)
+* `time` - Binary indicator pre-treatment (2015 = 0) and post-treatment (2019 = 1) period
+* `treatment` - Binary indicator for municipalites that where affected by the Federal Act in 2017 (varies with unit of analysis). 
+
+For the emplyoment data, the following files were used: The script `05_arbeitsmarkt.R` as well as the manually compiled data set `Arbeitsmarktdaten.xlsx` based on the e-mail correspondence with the nuclear power plants.
+
+Finally, the data set `g1g15` contained in the package `ggswissmaps` was used for the visualization of the catchment area of the nuclear power plant in Mühleberg. For all other visualizations either `all_gemeinden.RData` or `data_spillover.RData` (adapted dataset for main analysis with municipalities within a radius of 3km from the power plant considered as treated), served as the basis and were adapted to the visualization task accordingly.
+
+

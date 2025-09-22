@@ -1,0 +1,349 @@
+---
+title: "KZSVM"
+output: word_document
+---
+
+```{r}
+library(parallel)
+library(doParallel)
+K <- parallel::detectCores()
+cl <- makeCluster(K)
+registerDoParallel(cl)
+```
+
+```{r}
+
+# DATA PREPARATION
+
+# DATA: World Value Survey (2010-2014)
+library(readr)
+vv <- read_rds("WV6_Data.rds")
+dim(vv) # 89565   440
+
+# REDUCE DATA FRAME TO ONE COUNTRY: KAZAKHSTAN
+kz <- subset(vv, vv$V2A == 398) 
+dim(kz) # 1500  440
+
+# DECISION WHICH VARIABLES TO USE: Remove columns with more than 80% NA, incl. values < 0 (i.e. Missing, unknown, not asked, no answer, don't know).
+kz[kz < 0] <- NA
+kzred <- kz[, -which(colMeans(is.na(kz)) > 0.8)] 
+dim(kzred) # 330 out of 440 variables left for further calculations
+
+# EXCLUDE MORE VARIABLES
+# V1 -V3: wave, coutnry code, interview nr
+# V12-22: child qualities
+# V60-69: aim of country, future changes
+# V254-end: interview related questions, post/materialism, I_values
+# + exclude V10: happiness (after mean imputaion I will add it again)
+
+kzred <- kzred[, c(4:10, 12:13 ,23:61, 72:264)] 
+dim(kzred) # 1500  241
+
+# Before mean/median imputation, check out variables which I will use later
+# DEMOCGRAPHIC VARIABLS
+hist(kzred$V229) # employment status
+hist(kzred$V230) # sector of employment
+hist(kzred$V239) # income
+hist(kzred$V240) # gender (1 = male, 2 = female)
+hist(kzred$V248) # education (most frequent categories: 5,9,7)
+hist(kzred$V241) # age -> skewed
+hist(log(kzred$V241)) # log of age does not help much => I will not use log
+hist(kzred$V57) # martial status (most frequent category: 1)
+hist(kzred$V254, breaks = 1000)
+sort(unique(kzred$V254)) 
+# 30: Armenian; 120: Azerbaijanian; 190: Belorussian; 230: Bulgarian; 235: Chechen; 280: China - Uygur nationality; 295: Chinese; 365: Dungan; 490: Georgian; 500: German; 705: Kazakh; 711: Koreans; 720: Kurd/Esid; 790: Moldavian; 797: Mordvin; 1200: Polish; 1220: Russian; 1280: Tatar; 1290: Turkish; 1302: Udmurt; 1310: Ukrainian; 1315: Uzbek
+median(kzred$V254, na.rm = T) # largest category: Kazakh
+hist(kzred$V58) # number of children (most frequent category: 2 children)
+
+
+## => fill in descriptions to Bhutan model
+# BHUTAN MODEL (in brackets the corresponding parameter of the Bhutan Happiness Index)
+hist(kzred$V6)   # important in life: leisure time (= time use)
+hist(kzred$V11)  # Sate of health (= health)
+hist(kzred$V23)  # satisfaction with life (= psychological wellbeing)
+hist(kzred$V59)  # Satisfaction with financial situation of household (= living standard)
+hist(kzred$V78)  # Looking after the environment is important to this person (= Ecological diversity and resilience)
+hist(kzred$V79)  # Religious or family tradition is important to this person (= cultural diversity and resilience)
+hist(kzred$V213) # I see myself as part of my local community (= Community vitality)
+hist(kzred$V248) # highest education level attained (= education)
+hist(kzred$V115) # Confidence: The government (= Good governance)
+
+## => fill in expressions of DV
+# DEPENDENT VARIABLE: SPLIT THE HAPPINESS VARIABLE INTO 0 (not-happy: for values 3 and 4) and 1 (happy: for values 1 and 2)
+kzred$happy <- NA
+kzred$happy <- ifelse(kz$V10 == 1 | kz$V10 == 2, 1, 0)
+sum(kzred$happy == 0) # 169 (not happy)
+sum(kzred$happy == 1) # 1331 (happy)
+169/1331 # 0.1269722
+
+# compare this to the average world happiness
+sum(vv$V10 == 1 | vv$V10 == 2) # 75042
+sum(vv$V10 == 3 | vv$V10 == 4) # 13765
+13765/75042 
+# 0.1269722 (world average: 0.1834306) of the sample population responted to be "not very happy" or "not at all happy", the remaining 0.8730278 (world average: 0.8165694) answered to be "rather happy" or "very happy".
+
+# MEDIAN IMPUTATION: 
+# Because some of my DEMOMOGRAPHIC variables are nominal and not ordinal, I will median impute them.
+# Because most of the other DEMOGRAPHIC and BHUTAN variables are more or less normally distributed, I will median impute all the BHUTAN and DEMOCGRAPHIC variables.
+# Conclusion for this poster: I will median impute all the variables whih I will use for my full model because this is easier.
+# (NOTE: "happy" does not have any NAs, and with median imputiaon there would also not be a problem with imputation, this would only be problematic with mean imputation.)
+
+library(Hmisc)
+medianimp <- function(x) {
+  impute(x, median)} 
+
+kzimp <- apply(kzred, 2, medianimp)
+kzimp <- as.data.frame(kzimp) # this df now includes "happy", but not V10
+
+# CORRELATION
+# check for correlation between BHUTAN variables + happiness
+x <- kzimp[, c("V23", "V11", "V248", "V6", "V79", "V115", "V213", "V78", "V59", "happy")]
+cor(x) # the variables correlate with "happy" weakly or not at all
+
+# check for correlation between DEMOGRAPHIC variables
+dcor <- kzimp[, c("V229", "V230", "V239", "V240", "V241", "V248", "V57", "V58", "V254", "happy")]
+cor(dcor) # the variables correlate with "happy" weakly or not at all
+
+# STANDARDIZE VARIABLES: 
+# I assume that the categories for most of my variables have the same "distance" between each other, therefore I treat them as continuous variables and standardize them
+# Exceptions are: gender, education, occupation, martial status, ethnic group, employment status and number of children
+# further I exclude the variables V125_16 and V125_17 which have a max/min/median of 0 and therefore no variation which could explain anything
+dfstd <- subset(kzimp, select = -c(V240, V248, V230, V241, V57, V254, V229, V58, happy, V125_16, V125_17))
+
+standardize <- function(x){
+  x <- x - mean(x, na.rm = TRUE)
+  return(x/(sd(x, na.rm = TRUE)))
+  }
+
+fulldata <- dfstd[,]
+fulldata <- apply(fulldata, 2, standardize)
+fulldata <- as.data.frame(fulldata)
+
+fulldata$happy <- kzimp$happy
+fulldata$V240 <- kzimp$V240
+fulldata$V248 <- kzimp$V248
+fulldata$V230 <- kzimp$V230
+fulldata$V241 <- kzimp$V241
+fulldata$V57 <- kzimp$V57
+fulldata$V254 <- kzimp$V254
+fulldata$V229 <- kzimp$V229
+fulldata$V58 <- kzimp$V58
+
+fulldata[,'constant'] <- 1
+fulldata$happy <- as.factor(fulldata$happy)
+
+# MAKE MODELS
+m.demo <- happy ~ V239 + V240 + V248 + V230 + V241 + V57 + V254 + V229 + V58
+m.bhutan <- happy ~ V23 + V11 + V248 + V6 + V79 + V115 + V213 + V78 + V59 
+
+
+# SPLIT DATA INTO TEST AND TRAINING DATA
+set.seed(10)
+n <- nrow(fulldata)
+trainIndex <- sample(1:n, size = round (0.8*n), replace = F) # 80 percent goes into training data set
+train <- fulldata[trainIndex,] # selects from the 80 percent randomly created data set drawn from kzstd
+test <- fulldata[-trainIndex,]
+nrow(train)  # 1200
+nrow(test)   # 300
+
+```
+
+# SUPORT VECTOR MACHINE
+```{r}
+library(caret)
+set.seed(10)
+fitControl <- trainControl(method = "cv", number = 5, classProbs = T, summaryFunction = twoClassSummary)
+
+
+# BHUTAN MODEL
+##############
+
+# LINEAR KERNEL
+set.seed(10)
+m.k.bhutan <- make.names(happy) ~ V23 + V11 + V248 + V6 + V79 + V115 + V213 + V78 + V59
+(svmlinear.b <- train(m.k.bhutan, data = train, method = "svmLinear2", trControl = fitControl, metric = "ROC", tuneGrid = data.frame(cost = seq(0.001, 10, by = 0.5))))
+#  => ROC: 0.8466760  (OK)
+
+
+
+# POLYNOMIAL KERNEL
+set.seed(10)
+gridpoly <- expand.grid(C= seq(from = 0.001, to = 5, by = 0.05), degree=c(2,3,4), scale=c(0.01, 0.1, 5))
+
+(svmpoly.b <- train(m.k.bhutan, data = train, method = "svmPoly", trControl = fitControl, metric = "ROC", tuneLength = 5)) 
+#  => ROC: 0.8537730 (OK)
+
+# RADIAL KERNEL
+set.seed(10)
+svmGrid <- expand.grid(sigma= c(0.01:10, by = 0.5), C= c(0.01:10, by = 0.5))
+(svmradial.b <- train(m.k.bhutan, data = train, method = "svmRadial", metric = "ROC", tuneGrid = svmGrid, trControl = fitControl))
+# => ROC: 0.8225502  (OK)
+
+```
+
+```{r}
+# DEMOGRAPHIC MODEL
+###################
+# LINEAR KERNEL
+set.seed(10)
+m.k.demo <- make.names(happy) ~ V239 + V240 + V248 + V230 + V241 + V57 + V254 + V229 + V58
+(svmlinear.d <- train(m.k.demo, data = train, method = "svmLinear2", trControl = fitControl, metric = "ROC", tuneGrid = data.frame(cost = seq(0.001, 10, by = 0.5))))
+# => ROC: 0.6055357 (OK)
+
+# POLYNOMIAL KERNEL
+set.seed(10)
+(svmpoly.d <- train(m.k.demo, data = train, method = "svmPoly", trControl = fitControl, metric = "ROC", tuneLength = 5)) ###
+# => ROC0.6616679 (OK)
+
+# RADIAL KERNEL
+set.seed(10)
+svmGrid <- expand.grid(sigma= c(0.01:10, by = 0.5), C= c(0.01:10, by = 0.5))
+(svmradial.d <- train(m.k.demo, data = train, method = "svmRadial", tuneGrid = svmGrid, trControl = fitControl, metric = "ROC"))
+# => ROC: 0.6266680  (OK)
+```
+
+```{r}
+# FULL MODEL
+##############
+# LINEAR KERNEL
+set.seed(10)
+(svmlinear.f <- train(make.names(happy) ~., data = train, method = "svmLinear2", trControl = fitControl, metric = "ROC", tuneGrid = data.frame(cost = seq(0.001, 10, by = 0.5))))
+# => ROC: 0.8480249 (OK)
+
+# POLYNOMIAL KERNEL
+set.seed(10)
+#gridpoly <- expand.grid(C= seq(from = 0.001, to = 5, by = 0.05), degree=c(2,3,4), scale=c(0.01, 0.1, 5))
+(svmpoly.f <- train(make.names(happy) ~ ., data = train, method = "svmPoly", trControl = fitControl, metric = "ROC", tuneLength = 5)) 
+# => ROC: 0.8425102 (OK)
+
+# RADIAL KERNEL
+set.seed(10)
+svmGrid <- expand.grid(sigma= c(0.01:10, by = 0.5), C= c(0.01:10, by = 0.5))
+(svmradial.f <- train(make.names(happy) ~., data = train, method = "svmRadial", tuneGrid = svmGrid, trControl = fitControl, metric = "ROC"))
+# => ROC: 0.7393203  (OK)
+
+plot(svmlinear.b)
+plot(svmpoly.b)
+plot(svmradial.b)
+plot(svmlinear.d)
+plot(svmpoly.d)
+plot(svmradial.d)
+plot(svmlinear.f)
+plot(svmpoly.f)
+plot(svmradial.f)
+
+```
+
+```{r}
+# CLASSIFICATION ACCURACY (ROC) FOR SVM
+
+y <- test$happy
+
+# BHUTAN 
+yhatR <- predict(svmlinear.b, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8633333
+
+
+yhatR <- predict(svmpoly.b, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8666667
+
+yhatR <- predict(svmradial.b, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.88
+
+
+# DEMOGRAPHIC
+yhatR <- predict(svmlinear.d, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8633333
+
+yhatR <- predict(svmpoly.d, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8633333
+
+yhatR <- predict(svmradial.d, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8633333
+
+
+# FULL
+yhatR <- predict(svmlinear.f, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8633333
+
+yhatR <- predict(svmpoly.f, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.85
+
+yhatR <- predict(svmradial.f, test)
+sum(diag(table(y, yhatR))/length(y)) # 0.8566667
+
+
+# # AUC FOR TEST DATA - FULL
+set.seed(10)
+yhatR.l <- predict(svmlinear.f, test, type = "prob")
+yhatR.p <- predict(svmpoly.f, test, type = "prob")
+yhatR.r <- predict(svmradial.f, test, type = "prob")
+
+svl.roc <- roc(test$happy, yhatR.l$happy)
+svp.roc <- roc(test$happy, yhatR.p$happy)
+svr.roc <- roc(test$happy, yhatR.r$happy)
+
+svl.roc$auc # 0.7473
+svp.roc$auc # 0.6478
+svr.roc$auc # 0.7384
+
+
+
+# # AUC FOR TEST DATA - BHUTAN
+set.seed(10)
+yhatR.l.b <- predict(svmlinear.b, test, type = "prob")
+yhatR.p.b <- predict(svmpoly.b, test, type = "prob")
+yhatR.r.b <- predict(svmradial.b, test, type = "prob")
+
+svl.roc.b <- roc(test$happy, yhatR.l.b$happy)
+svp.roc.b <- roc(test$happy, yhatR.p.b$happy)
+svr.roc.b <- roc(test$happy, yhatR.r.b$happy)
+
+svl.roc.b$auc # 0.7873
+svp.roc.b$auc # 0.7432
+svr.roc.b$auc # 0.7475
+
+# AUC FOR TEST DATA - DEMOGRAPHIC
+set.seed(10)
+yhatR.l.d <- predict(svmlinear.d, test, type = "prob")
+yhatR.p.d <- predict(svmpoly.d, test, type = "prob")
+yhatR.r.d <- predict(svmradial.d, test, type = "prob")
+
+svl.roc.d <- roc(test$happy, yhatR.l.d$happy)
+svp.roc.d <- roc(test$happy, yhatR.p.d$happy)
+svr.roc.d <- roc(test$happy, yhatR.r.d$happy)
+
+svl.roc.d$auc # 0.5929
+svp.roc.d$auc # 0.7461
+svr.roc.d$auc # 0.617
+
+
+
+```
+
+```{r}
+varImp(svmradial.f) # most important: V23, V11, V239, V59, V55, V188, V241, V242, V191, V211
+varImp(svmradial.b) # most important: V23, V11, V59, V6, V248, V78, V79, V213, V115 (0)
+varImp(svmradial.d) # most important: V239, V241, V57, V254, V58, V230, V248, V229, V240 (0)
+
+varImp(svmlinear.f) # dito svmradial.f
+varImp(svmlinear.b) # dito svmradial.b
+varImp(svmlinear.d) # dito svmradial.d
+
+varImp(svmpoly.f) # dito svmradial.f
+varImp(svmpoly.b) # dito svmradial.b
+varImp(svmpoly.d) # dito svmradial.d
+
+```
+
+
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+
+
+
+

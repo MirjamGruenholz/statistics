@@ -1,0 +1,365 @@
+---
+title: "RandomForest"
+output: word_document
+---
+
+# RANDOM FOREST
+
+
+```{r}
+library(parallel)
+library(doParallel)
+K <- parallel::detectCores()
+cl <- makeCluster(K)
+registerDoParallel(cl)
+```
+
+```{r}
+
+# DATA PREPARATION
+
+# DATA: World Value Survey (2010-2014)
+library(readr)
+vv <- read_rds("WV6_Data.rds")
+dim(vv) # 89565   440
+
+# REDUCE DATA FRAME TO ONE COUNTRY: KAZAKHSTAN
+kz <- subset(vv, vv$V2A == 398) 
+dim(kz) # 1500  440
+
+# DECISION WHICH VARIABLES TO USE: Remove columns with more than 80% NA, incl. values < 0 (i.e. Missing, unknown, not asked, no answer, don't know).
+kz[kz < 0] <- NA
+kzred <- kz[, -which(colMeans(is.na(kz)) > 0.8)] 
+dim(kzred) # 330 out of 440 variables left for further calculations
+
+# EXCLUDE MORE VARIABLES
+# V1 -V3: wave, coutnry code, interview nr
+# V12-22: child qualities
+# V60-69: aim of country, future changes
+# V254-end: interview related questions, post/materialism, I_values
+# + exclude V10: happiness (after mean imputaion I will add it again)
+
+kzred <- kzred[, c(4:10, 12:13 ,23:61, 72:264)] 
+dim(kzred) # 1500  241
+
+# Before mean/median imputation, check out variables which I will use later
+# DEMOCGRAPHIC VARIABLS
+hist(kzred$V229) # employment status
+hist(kzred$V230) # sector of employment
+hist(kzred$V239) # income
+hist(kzred$V240) # gender (1 = male, 2 = female)
+hist(kzred$V248) # education (most frequent categories: 5,9,7)
+hist(kzred$V241) # age -> skewed
+hist(log(kzred$V241)) # log of age does not help much => I will not use log
+hist(kzred$V57) # martial status (most frequent category: 1)
+hist(kzred$V254, breaks = 1000)
+sort(unique(kzred$V254)) 
+# 30: Armenian; 120: Azerbaijanian; 190: Belorussian; 230: Bulgarian; 235: Chechen; 280: China - Uygur nationality; 295: Chinese; 365: Dungan; 490: Georgian; 500: German; 705: Kazakh; 711: Koreans; 720: Kurd/Esid; 790: Moldavian; 797: Mordvin; 1200: Polish; 1220: Russian; 1280: Tatar; 1290: Turkish; 1302: Udmurt; 1310: Ukrainian; 1315: Uzbek
+median(kzred$V254, na.rm = T) # largest category: Kazakh
+hist(kzred$V58) # number of children (most frequent category: 2 children)
+
+
+## => fill in descriptions to Bhutan model
+# BHUTAN MODEL (in brackets the corresponding parameter of the Bhutan Happiness Index)
+hist(kzred$V6)   # important in life: leisure time (= time use)
+hist(kzred$V11)  # Sate of health (= health)
+hist(kzred$V23)  # satisfaction with life (= psychological wellbeing)
+hist(kzred$V59)  # Satisfaction with financial situation of household (= living standard)
+hist(kzred$V78)  # Looking after the environment is important to this person (= Ecological diversity and resilience)
+hist(kzred$V79)  # Religious or family tradition is important to this person (= cultural diversity and resilience)
+hist(kzred$V213) # I see myself as part of my local community (= Community vitality)
+hist(kzred$V248) # highest education level attained (= education)
+hist(kzred$V115) # Confidence: The government (= Good governance)
+
+## => fill in expressions of DV
+# DEPENDENT VARIABLE: SPLIT THE HAPPINESS VARIABLE INTO 0 (not-happy: for values 3 and 4) and 1 (happy: for values 1 and 2)
+kzred$happy <- NA
+kzred$happy <- ifelse(kz$V10 == 1 | kz$V10 == 2, 1, 0)
+sum(kzred$happy == 0) # 169 (not happy)
+sum(kzred$happy == 1) # 1331 (happy)
+169/1331 # 0.1269722
+
+# compare this to the average world happiness
+sum(vv$V10 == 1 | vv$V10 == 2) # 75042
+sum(vv$V10 == 3 | vv$V10 == 4) # 13765
+13765/75042 
+# 0.1269722 (world average: 0.1834306) of the sample population responted to be "not very happy" or "not at all happy", the remaining 0.8730278 (world average: 0.8165694) answered to be "rather happy" or "very happy".
+
+# MEDIAN IMPUTATION: 
+# Because some of my DEMOMOGRAPHIC variables are nominal and not ordinal, I will median impute them.
+# Because most of the other DEMOGRAPHIC and BHUTAN variables are more or less normally distributed, I will median impute all the BHUTAN and DEMOCGRAPHIC variables.
+# Conclusion for this poster: I will median impute all the variables whih I will use for my full model because this is easier.
+# (NOTE: "happy" does not have any NAs, and with median imputiaon there would also not be a problem with imputation, this would only be problematic with mean imputation.)
+
+library(Hmisc)
+medianimp <- function(x) {
+  impute(x, median)} 
+
+kzimp <- apply(kzred, 2, medianimp)
+kzimp <- as.data.frame(kzimp) # this df now includes "happy", but not V10
+
+# CORRELATION
+# check for correlation between BHUTAN variables + happiness
+x <- kzimp[, c("V23", "V11", "V248", "V6", "V79", "V115", "V213", "V78", "V59", "happy")]
+cor(x) # the variables correlate with "happy" weakly or not at all
+
+# check for correlation between DEMOGRAPHIC variables
+dcor <- kzimp[, c("V229", "V230", "V239", "V240", "V241", "V248", "V57", "V58", "V254", "happy")]
+cor(dcor) # the variables correlate with "happy" weakly or not at all
+
+# STANDARDIZE VARIABLES: 
+# I assume that the categories for most of my variables have the same "distance" between each other, therefore I treat them as continuous variables and standardize them
+# Exceptions are: gender, education, occupation, martial status, ethnic group, employment status and number of children
+# further I exclude the variables V125_16 and V125_17 which have a max/min/median of 0 and therefore no variation which could explain anything
+dfstd <- subset(kzimp, select = -c(V240, V248, V230, V241, V57, V254, V229, V58, happy, V125_16, V125_17))
+
+standardize <- function(x){
+  x <- x - mean(x, na.rm = TRUE)
+  return(x/(sd(x, na.rm = TRUE)))
+  }
+
+fulldata <- dfstd[,]
+fulldata <- apply(fulldata, 2, standardize)
+fulldata <- as.data.frame(fulldata)
+
+fulldata$happy <- kzimp$happy
+fulldata$V240 <- kzimp$V240
+fulldata$V248 <- kzimp$V248
+fulldata$V230 <- kzimp$V230
+fulldata$V241 <- kzimp$V241
+fulldata$V57 <- kzimp$V57
+fulldata$V254 <- kzimp$V254
+fulldata$V229 <- kzimp$V229
+fulldata$V58 <- kzimp$V58
+
+fulldata[,'constant'] <- 1
+fulldata$happy <- as.factor(fulldata$happy)
+
+# MAKE MODELS
+m.demo <- happy ~ V239 + V240 + V248 + V230 + V241 + V57 + V254 + V229 + V58
+m.bhutan <- happy ~ V23 + V11 + V248 + V6 + V79 + V115 + V213 + V78 + V59 
+
+
+# SPLIT DATA INTO TEST AND TRAINING DATA
+set.seed(10)
+n <- nrow(fulldata)
+trainIndex <- sample(1:n, size = round (0.8*n), replace = F) # 80 percent goes into training data set
+train <- fulldata[trainIndex,] # selects from the 80 percent randomly created data set drawn from kzstd
+test <- fulldata[-trainIndex,]
+nrow(train)  # 1200
+nrow(test)   # 300
+
+```
+
+# RANDOM FOREST / BAGGING / BOOSTING
+```{r}
+
+train$happy <- ifelse(train$happy == 1, "happy", "nothappy")
+train$happy <- as.factor(train$happy)
+test$happy <- ifelse(test$happy == 1, "happy", "nothappy")
+test$happy <- as.factor(test$happy)
+
+
+library(caret)
+library(gbm)
+library(ROCR)
+library(pROC)
+set.seed(10)
+
+fitControl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+```
+
+
+bagging BHUTAN: sqrt(9) = 3 / bagging DEMOGRAPHIC: sqrt(9) = 3 / bagging FULL: sqrt(241) = 15
+boost BHUTAN: mtry = 9 / boost DEMOGRAPHIC: mtry = 9 / boost FULL: mtry = 241
+
+```{r}
+# BHUTAN MODEL
+
+# OPTIMAL
+gridrf <- expand.grid(mtry = c(1,2,3,5,9))
+
+set.seed(10)
+rf.bhutan <- train(m.bhutan, data = train, method = 'rf', tuneGrid = gridrf, trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.bhutan # The final value used for the model was mtry = 1. => ROC: 0.8249807
+plot(rf.bhutan)
+
+# OPIMAL
+set.seed(10)
+rf.b.1 <- train(m.bhutan, data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(1)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.b.1 # 0.8437349
+
+# BOOST
+set.seed(10)
+rf.b.9 <- train(m.bhutan, data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(9)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.b.9 # 0.8263992
+
+# BAGGING
+set.seed(10)
+rf.b.3 <- train(m.bhutan, data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(3)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.b.3 # 0.8386266
+
+# train ROC
+train$happy <- as.factor(train$happy)
+
+tr.roc.b <- predict(rf.bhutan, train, type = "prob")
+tr.roc.b.1 <- predict(rf.b.1, train, type = "prob")
+tr.roc.b.3 <- predict(rf.b.3, train, type = "prob")
+tr.roc.b.9 <- predict(rf.b.9, train, type = "prob")
+
+roc.b.1 <- roc(train$happy, tr.roc.b.1$happy)
+roc.b.3 <- roc(train$happy, tr.roc.b.3$happy)
+roc.b.9 <- roc(train$happy, tr.roc.b.9$happy)
+
+# ROC plot with training data
+plot(roc.b.1, col = 1) # optimal train
+lines(roc.b.3, col = 2)
+lines(roc.b.9, col = 3)
+
+# AUC for training data
+roc.b.1$auc # 0.9943
+roc.b.3$auc # 0.9999
+roc.b.9$auc # 1
+
+
+# test ROC
+test$happy <- as.factor(test$happy)
+
+te.roc.b <- predict(rf.bhutan, test, type = "prob")
+te.roc.b.1 <- predict(rf.b.1, test, type = "prob")
+te.roc.b.3 <- predict(rf.b.3, test, type = "prob")
+te.roc.b.9 <- predict(rf.b.9, test, type = "prob")
+
+roc.b.te <- roc(test$happy, te.roc.b$happy)
+roc.b.1.te <- roc(test$happy, te.roc.b.1$happy)
+roc.b.3.te <- roc(test$happy, te.roc.b.3$happy)
+roc.b.9.te <- roc(test$happy, te.roc.b.9$happy)
+
+# ROC plot with training data
+plot(roc.b.1.te, col = 1, main = "Random Forest for Test Data")
+lines(roc.b.3.te, col = 2)
+lines(roc.b.9.te, col = 3)
+lines(roc.b.te, col = 4)
+
+# AUC for training data
+roc.b.1.te$auc # 0.8042
+roc.b.3.te$auc # 0.7913
+roc.b.9.te$auc # 0.772
+
+```
+
+
+```{r}
+# FULL MODEL
+
+# bagging BHUTAN: sqrt(9) = 3 / bagging DEMOGRAPHIC: sqrt(9) = 3 / bagging FULL: sqrt(240) = 15
+# boost BHUTAN: mtry = 9 / boost DEMOGRAPHIC: mtry = 9 / boost FULL: mtry = 241
+
+
+# FIND OPTIMAL
+gridrf <- expand.grid(mtry = c(1,2,15,240))
+
+set.seed(10)
+rf.full <- train(happy ~., data = train, method = 'rf', tuneGrid = gridrf, trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.full # The final value used for the model was mtry = 15. => ROC: 0.8391272
+
+plot(rf.full)
+
+
+# OPIMAL = BAGGING (ckeck numbers...)
+set.seed(10)
+
+rf.f.15 <- train(happy ~ ., data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(15)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.f.15 # ROC: 0.8429211 (OK)
+
+# BOOST
+set.seed(10)
+rf.f.240 <- train(happy ~., data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(240)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.f.240 # 0.8373818 (OK)
+
+# BAGGING
+set.seed(10)
+rf.f.15 <- train(happy ~., data = train, method = 'rf', tuneGrid = expand.grid(mtry = c(15)), trControl = fitControl, metric = "ROC", ntree = 1000)
+rf.f.15 # 0.8240474 (OK)
+
+```
+
+
+```{r}
+# train ROC
+train$happy <- as.factor(train$happy)
+
+tr.roc.f <- predict(rf.full, train, type = "prob")
+tr.roc.f.15 <- predict(rf.f.15, train, type = "prob")
+tr.roc.f.240 <- predict(rf.f.240, train, type = "prob")
+
+roc.f <- roc(train$happy, tr.roc.f$happy)
+roc.f.15 <- roc(train$happy, tr.roc.f.15$happy)
+roc.f.240 <- roc(train$happy, tr.roc.f.240$happy)
+
+# ROC plot with training data
+plot(roc.f, col = 1) # optimal train
+lines(roc.f.15, col = 2)
+lines(roc.f.240, col = 3)
+
+# AUC for training data
+roc.f$auc # 1
+roc.f.15$auc # 1
+roc.f.240$auc # 1
+
+
+# test ROC
+test$happy <- as.factor(test$happy)
+
+te.roc.f <- predict(rf.full, test, type = "prob")
+te.roc.f.15 <- predict(rf.f.15, test, type = "prob")
+te.roc.f.240 <- predict(rf.f.240, test, type = "prob")
+
+roc.f.te <- roc(test$happy, te.roc.f$happy)
+roc.f.15.te <- roc(test$happy, te.roc.f.15$happy)
+roc.f.240.te <- roc(test$happy, te.roc.f.240$happy)
+
+# ROC plot with training data
+plot(roc.f.te, col = 1, main = "Random Forest for Test Data")
+lines(roc.f.15.te, col = 2)
+lines(roc.f.240.te, col = 3)
+
+# AUC for training data
+roc.f.te$auc # 0.8254
+roc.f.15.te$auc # 0.8231
+roc.f.240.te$auc # 0.7894
+```
+
+
+# BOOST REGRESSION TREE
+```{r}
+gbmgrid <- expand.grid(interaction.depth = c(1,2,3,4),
+                       n.trees = c(100, 250, 500, 2000, 4000),
+                       shrinkage = c(0.1, 0.01, 0.001),
+                       n.minobsinnode = 20)
+
+
+set.seed(10)
+gbmfit <- train(happy ~., data = train, method = "gbm", trControl = fitControl, tuneGrid = gbmgrid, metric = "ROC")
+gbmfit # The final values used for the model were n.trees = 2000, interaction.depth = 2, shrinkage = 0.01  and n.minobsinnode = 20. ==> ROC: 0.8748921 (OK)
+
+plot(gbmfit)
+
+gmbpred <- predict.gbm(gbmfit, test, type = "prob")
+
+
+```
+
+
+# don't include in poster...
+set.seed(10)
+gbmfit.b <- train(m.bhutan, data = train, method = "gbm", trControl = fitControl, tuneGrid = gbmgrid, metric = "ROC")
+gbmfit.b # The final values used for the model were n.trees = 4000, interaction.depth = 1, shrinkage = 0.001  and n.minobsinnode = 20. ==> ROC: 0.8688800 (OK)
+
+plot(gbmfit.b)  
+
+```
+
+
+
+
