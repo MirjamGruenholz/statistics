@@ -130,7 +130,6 @@ Network perumations, Quadratic Assignment Procedure (QAP), Conditional Uniform G
 Details: [3e_social_network_analysis](/3_ma_comparative_and_international_studies/3e_social_network_analysis/)
 
 
-***test***
 
 
 
